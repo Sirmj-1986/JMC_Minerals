@@ -1,0 +1,167 @@
+// ---------------- ROI ----------------
+var kogi = ee.Geometry.Polygon([
+  [6.384633300164806, 8.00523783856405],
+  [6.384633300164806, 7.918874512340253],
+  [6.588567015985118, 7.918874512340253],
+  [6.588567015985118, 8.00523783856405]
+]);
+
+Map.centerObject(kogi, 12.5);
+Map.addLayer(kogi, {}, 'ROI')
+
+
+// ---------------- ASTER ----------------
+var asterRaw = ee.ImageCollection("ASTER/AST_L1T_003")
+  .filterBounds(kogi)
+  .filter(ee.Filter.lt('CLOUDCOVER', 0.1))
+  .filter(ee.Filter.calendarRange(11, 3, 'month')) // dry season
+  .median()
+  .clip(kogi);
+  
+  Map.addLayer(asterRaw, {}, 'Raw ASTER', false);
+
+var asterBandNames = ['B01','B02','B3N','B04','B05','B06','B07','B08','B09'];
+var asterBands = asterRaw.select(asterBandNames);
+
+function applyDOS(image, bandNames) {
+  return ee.Image.cat(bandNames.map(function(bandName) {
+    var band = image.select(bandName);
+    var darkObj = band.reduceRegion({
+      reducer: ee.Reducer.percentile([1]),
+      geometry: kogi,
+      scale: 30,
+      maxPixels: 1e9
+    }).get(bandName);
+    var corrected = band.subtract(ee.Number(darkObj)).rename(bandName);
+    return corrected.max(0);
+  }));
+}
+var asterDOS = applyDOS(asterRaw, asterBandNames).clip(kogi);
+Map.addLayer(asterDOS, {}, 'ASTER DOS Corrected', false);
+
+var references = {
+  Calcite:    [0.19, 0.22, 0.23, 0.28, 0.32, 0.31, 0.29, 0.26, 0.22],
+  Kaolinite:  [0.12, 0.14, 0.16, 0.20, 0.24, 0.23, 0.22, 0.20, 0.18],
+  IronOxide:  [0.42, 0.45, 0.46, 0.38, 0.32, 0.28, 0.25, 0.23, 0.20],
+};
+
+function spectralAngle(image, referenceSpectrum, bands) {
+  var ref = ee.Image.constant(referenceSpectrum).toArray();
+  var img = image.select(bands).toArray();
+  var dot = img.multiply(ref).arrayReduce(ee.Reducer.sum(), [0]);
+  var normI = img.multiply(img).arrayReduce(ee.Reducer.sum(), [0]).sqrt();
+  var normR = ref.multiply(ref).arrayReduce(ee.Reducer.sum(), [0]).sqrt();
+  var cosSim = dot.divide(normI.multiply(normR));
+  return cosSim.acos().multiply(180 / Math.PI)
+               .arrayProject([0])
+               .arrayFlatten([['angle']]);
+}
+
+function spectralAngle(image, referenceSpectrum, bands) {
+  var ref = ee.Image.constant(referenceSpectrum).toArray();
+  var img = image.select(bands).toArray();
+  var dot = img.multiply(ref).arrayReduce(ee.Reducer.sum(), [0]);
+  var normI = img.multiply(img).arrayReduce(ee.Reducer.sum(), [0]).sqrt();
+  var normR = ref.multiply(ref).arrayReduce(ee.Reducer.sum(), [0]).sqrt();
+  var cosSim = dot.divide(normI.multiply(normR));
+  return cosSim.acos().multiply(180 / Math.PI).arrayProject([0]).arrayFlatten([['angle']]);
+}
+
+var samColors = {
+  Calcite:   'red',
+  Kaolinite: 'green',
+  IronOxide: 'orange',
+};
+
+var samImage = ee.Image([]);
+function spectralAngle(image, referenceSpectrum, bands) {
+  var ref = ee.Image.constant(referenceSpectrum).toArray();
+  var img = image.select(bands).toArray();
+  var dot = img.multiply(ref).arrayReduce(ee.Reducer.sum(), [0]);
+  var normI = img.multiply(img).arrayReduce(ee.Reducer.sum(), [0]).sqrt();
+  var normR = ref.multiply(ref).arrayReduce(ee.Reducer.sum(), [0]).sqrt();
+  var cosSim = dot.divide(normI.multiply(normR));
+  return cosSim.acos().multiply(180 / Math.PI).arrayProject([0]).arrayFlatten([['angle']]);
+}
+
+var samColors = {
+  Calcite:   'red',
+  Kaolinite: 'green',
+  IronOxide: 'orange',
+};
+var samImage = ee.Image([]);
+
+Object.keys(references).forEach(function(mineral) {
+  var angle = spectralAngle(asterDOS, references[mineral], asterBandNames).rename(mineral + '_SAM');
+  samImage = samImage.addBands(angle);
+  var mask = angle.lt(8).selfMask().rename(mineral + '_Mask');
+  Map.addLayer(angle, {min: 0, max: 45, palette: ['purple', 'white','orange','green','blue','red']}, mineral + ' SAM Angle', false);
+  Map.addLayer(mask, {palette: [samColors[mineral]]}, mineral + ' SAM (Masked)');
+});
+// ============================== P  C  A ============================================
+// ---------------- Step 1: Select and Clip ASTER Bands ---------------------
+var bands = ['B01', 'B02', 'B3N', 'B04', 'B05', 'B06', 'B07', 'B08', 'B09'];
+var image = asterDOS.select(bands).clip(kogi);  // asterDOS should be your corrected ASTER image
+
+
+Map.addLayer(image, {
+  bands: ['B09', 'B06', 'B3N'],
+  min: 0.0,
+  max: 0.3,
+  gamma: 1.4
+}, 'ASTER SWIR Composite');
+
+
+var imageArray = image.toArray();
+var bandNames = image.bandNames();
+print('ASTER Band Names:', bandNames);
+
+
+var meanDict = image.reduceRegion({
+  reducer: ee.Reducer.mean(),
+  geometry: kogi,
+  scale: 30,
+  maxPixels: 1e13
+});
+
+
+var meanValues = meanDict.values(bandNames);
+var meanImage = ee.Image.constant(meanValues).rename(bandNames);
+var normalized = image.subtract(meanImage);
+
+
+var arrayImage = normalized.toArray();
+
+
+var covar = arrayImage.reduceRegion({
+  reducer: ee.Reducer.covariance(),
+  geometry: kogi,
+  scale: 30,
+  maxPixels: 1e13
+});
+
+var covarArray = ee.Array(covar.get('array'));
+print('Covariance Matrix:', covarArray);
+
+var eigens = covarArray.eigen();
+var eigenValues = eigens.slice(1, 0, 1);
+var eigenVectors = eigens.slice(1, 1);
+print('Eigenvalues:', eigenValues);
+print('Eigenvectors:', eigenVectors);
+
+
+var flatArray = image.toArray().toArray(1);  // shape: [bands x 1]
+
+
+var principalComponents = ee.Image(eigenVectors).matrixMultiply(flatArray);
+
+var pcImage = principalComponents
+  .arrayProject([0])
+  .arrayFlatten([[
+    'PC1','PC2','PC3','PC4','PC5','PC6','PC7','PC8','PC9'
+  ]]);
+
+Map.addLayer(pcImage.select(['PC1', 'PC2', 'PC3']), {min: -2, max: 2}, 'PCA RGB (PC1-PC2-PC3)', false);
+Map.addLayer(pcImage.select(['PC2', 'PC3', 'PC5']), {min: -2, max: 2}, 'PCA RGB (PC2-PC3-PC5)', false);
+Map.addLayer(pcImage.select(['PC2', 'PC3', 'PC4']), {min: -2, max: 2}, 'PCA RGB (PC2-PC3-PC4)', false);
+
